@@ -1,8 +1,11 @@
+use anyhow::{Context, Error};
+use jsonpath_rust::JsonPathInst;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
     api::{Api, ListParams},
     Client,
 };
+use std::str::FromStr;
 use tracing::*;
 
 #[tokio::main]
@@ -13,11 +16,17 @@ async fn main() -> anyhow::Result<()> {
     // Equivalent to `kubectl get pods --all-namespace \
     // -o jsonpath='{.items[*].spec.containers[*].image}'`
     let field_selector = std::env::var("FIELD_SELECTOR").unwrap_or_default();
-    let jsonpath = format!(
-        "{}{}",
-        "$",
-        std::env::var("JSONPATH").unwrap_or_else(|_| ".items[*].spec.containers[*].image".into())
-    );
+    let jsonpath = {
+        let path = std::env::var("JSONPATH").unwrap_or_else(|_| ".items[*].spec.containers[*].image".into());
+        JsonPathInst::from_str(&format!("{}{}", "$", path.clone()))
+            .map_err(Error::msg)
+            .with_context(|| {
+                format!(
+                    "Failed to parse 'JSONPATH' value as a JsonPath expression.\n
+                     Got: {path}"
+                )
+            })?
+    };
 
     let pods: Api<Pod> = Api::<Pod>::all(client);
     let list_params = ListParams::default().fields(&field_selector);
@@ -25,7 +34,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Use the given JSONPATH to filter the ObjectList
     let list_json = serde_json::to_value(&list)?;
-    let res = jsonpath_lib::select(&list_json, &jsonpath).unwrap();
-    info!("\t\t {:?}", res);
+    for res in jsonpath.find_slice(&list_json) {
+        info!("\t\t {}", *res);
+    }
     Ok(())
 }
